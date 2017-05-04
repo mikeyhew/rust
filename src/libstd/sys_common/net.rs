@@ -189,6 +189,8 @@ pub fn lookup_host(host: &str) -> io::Result<LookupHost> {
                 c::res_init();
                 Err(e)
             },
+            // the cfg is needed here to avoid an "unreachable pattern" warning
+            #[cfg(not(unix))]
             Err(e) => Err(e),
         }
     }
