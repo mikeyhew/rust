@@ -189,7 +189,7 @@ pub fn lookup_host(host: &str) -> io::Result<LookupHost> {
                 c::res_init();
                 Err(e)
             },
-            e => e,
+            Err(e) => Err(e),
         }
     }
 }
