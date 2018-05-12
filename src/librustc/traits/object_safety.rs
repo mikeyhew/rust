@@ -23,7 +23,6 @@ use hir::def_id::DefId;
 use traits;
 use ty::{self, Ty, TyCtxt, TypeFoldable};
 use ty::subst::Substs;
-use ty::util::ExplicitSelf;
 use std::borrow::Cow;
 use syntax::ast;
 
@@ -58,8 +57,8 @@ impl ObjectSafetyViolation {
                          in its arguments or return type", name).into(),
             ObjectSafetyViolation::Method(name, MethodViolationCode::Generic) =>
                 format!("method `{}` has generic type parameters", name).into(),
-            ObjectSafetyViolation::Method(name, MethodViolationCode::NonStandardSelfType) =>
-                format!("method `{}` has a non-standard `self` type", name).into(),
+            ObjectSafetyViolation::Method(name, MethodViolationCode::UncoercibleSelfArg) =>
+                format!("method `{}` has an uncoercible `self` type", name).into(),
             ObjectSafetyViolation::AssociatedConst(name) =>
                 format!("the trait cannot contain associated consts like `{}`", name).into(),
         }
@@ -78,8 +77,8 @@ pub enum MethodViolationCode {
     /// e.g., `fn foo<A>()`
     Generic,
 
-    /// arbitrary `self` type, e.g. `self: Rc<Self>`
-    NonStandardSelfType,
+    /// the self argument can't be coerced from Self=dyn Trait to Self=T where T: Trait
+    UncoercibleSelfArg,
 }
 
 impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
@@ -257,23 +256,20 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
                                          method: &ty::AssociatedItem)
                                          -> Option<MethodViolationCode>
     {
-        // The method's first parameter must be something that derefs (or
-        // autorefs) to `&self`. For now, we only accept `self`, `&self`
-        // and `Box<Self>`.
+        // The method's first parameter must be named `self`
         if !method.method_has_self_argument {
             return Some(MethodViolationCode::StaticMethod);
         }
 
         let sig = self.fn_sig(method.def_id);
 
-        let self_ty = self.mk_self_type();
-        let self_arg_ty = sig.skip_binder().inputs()[0];
-        if let ExplicitSelf::Other = ExplicitSelf::determine(self_arg_ty, |ty| ty == self_ty) {
-            return Some(MethodViolationCode::NonStandardSelfType);
+        let receiver_ty = sig.skip_binder().inputs()[0];
+
+        if !self.receiver_is_coercible(trait_def_id, method, receiver_ty) {
+            return Some(MethodViolationCode::UncoercibleSelfArg);
         }
 
-        // The `Self` type is erased, so it should not appear in list of
-        // arguments or return type apart from the receiver.
+
         for input_ty in &sig.skip_binder().inputs()[1..] {
             if self.contains_illegal_self_type_reference(trait_def_id, input_ty) {
                 return Some(MethodViolationCode::ReferencesSelf);
@@ -289,6 +285,71 @@ impl<'a, 'gcx, 'tcx> TyCtxt<'a, 'gcx, 'tcx> {
         }
 
         None
+    }
+
+    // checks the type of the self argument, and makes sure it implements
+    // the CoerceUnsized requirement
+    #[allow(dead_code)]
+    fn receiver_is_coercible(self,
+                          trait_def_id: DefId,
+                          method: &ty::AssociatedItem,
+                          receiver_ty: Ty<'tcx>)
+                          -> bool
+    {
+        let traits = (self.lang_items().unsize_trait(),
+                      self.lang_items().coerce_unsized_trait());
+        let (unsize_did, coerce_unsized_did) = if let (Some(u), Some(cu)) = traits {
+            (u, cu)
+        } else {
+            debug!("Missing Unsize or CoerceUnsized traits");
+            return false;
+        };
+
+        // the type `U` in the query
+        // make this a bogus type parameter
+        let target_self_ty: Ty<'tcx> = unimplemented!();
+
+        // create a modified param env, with
+        // `Self: Unsize<U>` added to the caller bounds
+        let param_env = {
+            let mut param_env = self.param_env(method.def_id);
+
+            let predicate = ty::TraitRef {
+                def_id: unsize_did,
+                substs: self.mk_substs_trait(self.mk_self_type(), &[target_self_ty]),
+            }.to_predicate();
+
+            let caller_bounds: Vec<Predicate<'tcx>> = param_env.caller_bounds.iter()
+                .chain(std::iter::once(&predicate))
+                .collect();
+
+            param_env.caller_bounds = self.intern_predicates(&caller_bounds);
+
+            param_env
+        };
+
+        // this looks hard!
+        // the trait object type is not `dyn Trait`, it's
+        // `dyn Trait<'a1, ..., 'aN, Arg1, ..., ArgN, Assoc1=T1, ..., AssocN=TN> + 'a`
+        // probably an easier way to do this is to change the query to
+        // `for<Self: Unsize<U>, U> receiver_ty: CoerceUnsized<Self=U>`
+        //
+        // let trait_object_ty = self.mk_dynamic(
+        //     unimplemented!(), unimplemented!()
+        // );
+
+
+
+        // the type parameter for the `CoerceUnsized` bound
+        // `receiver_ty` must implement `CoerceUnsized<target_ty>`
+        // target_ty is `receiver_ty<Self=dyn Trait>`
+        let target_receiver_ty = receiver_ty.subst(
+            self.mk_substs_trait(target_self_ty, &[])
+        );
+
+        // create a version of receiver_ty with Self=dyn Trait
+
+        // check that `receiver_ty: CoerceUnsized<receiver_ty<Self=dyn Trait>`
     }
 
     fn contains_illegal_self_type_reference(self,
