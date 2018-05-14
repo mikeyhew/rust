@@ -73,11 +73,9 @@ use rustc::ty::fold::TypeFoldable;
 use rustc::ty::error::TypeError;
 use rustc::ty::relate::RelateResult;
 use errors::DiagnosticBuilder;
-use syntax::feature_gate;
 use syntax::ptr::P;
 use syntax_pos;
 
-use std::collections::VecDeque;
 use std::ops::Deref;
 
 struct Coerce<'a, 'gcx: 'a + 'tcx, 'tcx: 'a> {
@@ -457,13 +455,12 @@ impl<'f, 'gcx, 'tcx> Coerce<'f, 'gcx, 'tcx> {
     fn coerce_unsized(&self, source: Ty<'tcx>, target: Ty<'tcx>) -> CoerceResult<'tcx> {
         debug!("coerce_unsized(source={:?}, target={:?})", source, target);
 
-        let traits = (self.tcx.lang_items().unsize_trait(),
-                      self.tcx.lang_items().coerce_unsized_trait());
-        let (unsize_did, coerce_unsized_did) = if let (Some(u), Some(cu)) = traits {
-            (u, cu)
-        } else {
-            debug!("Missing Unsize or CoerceUnsized traits");
-            return Err(TypeError::Mismatch);
+        let coerce_unsized_did = match self.tcx.lang_items().coerce_unsized_trait() {
+            Some(did) => did,
+            None => {
+                debug!("Missing Unsize or CoerceUnsized traits");
+                return Err(TypeError::Mismatch);
+            }
         };
 
         // Note, we want to avoid unnecessary unsizing. We don't want to coerce to
@@ -522,7 +519,7 @@ impl<'f, 'gcx, 'tcx> Coerce<'f, 'gcx, 'tcx> {
         // for the former and let type inference do the rest.
         let origin = TypeVariableOrigin::MiscVariable(self.cause.span);
         let coerce_target = self.next_ty_var(origin);
-        let mut coercion = self.unify_and(coerce_target, target, |target| {
+        let mut coercion: InferOk<'tcx, (Vec<Adjustment<'tcx>>, Ty<'tcx>)> = self.unify_and(coerce_target, target, |target| {
             let unsize = Adjustment {
                 kind: Adjust::Unsize,
                 target
@@ -535,77 +532,23 @@ impl<'f, 'gcx, 'tcx> Coerce<'f, 'gcx, 'tcx> {
             }
         })?;
 
-        let mut selcx = traits::SelectionContext::new(self);
-
-        // Use a FIFO queue for this custom fulfillment procedure.
-        let mut queue = VecDeque::new();
-
         // Create an obligation for `Source: CoerceUnsized<Target>`.
         let cause = ObligationCause::misc(self.cause.span, self.body_id);
-        queue.push_back(self.tcx.predicate_for_trait_def(self.fcx.param_env,
-                                                         cause,
-                                                         coerce_unsized_did,
-                                                         0,
-                                                         coerce_source,
-                                                         &[coerce_target]));
+        let predicate = self.tcx.predicate_for_trait_def(
+            self.fcx.param_env,
+            cause,
+            coerce_unsized_did,
+            0,
+            coerce_source,
+            &[coerce_target],
+        );
 
-        let mut has_unsized_tuple_coercion = false;
-
-        // Keep resolving `CoerceUnsized` and `Unsize` predicates to avoid
-        // emitting a coercion in cases like `Foo<$1>` -> `Foo<$2>`, where
-        // inference might unify those two inner type variables later.
-        let traits = [coerce_unsized_did, unsize_did];
-        while let Some(obligation) = queue.pop_front() {
-            debug!("coerce_unsized resolve step: {:?}", obligation);
-            let trait_ref = match obligation.predicate {
-                ty::Predicate::Trait(ref tr) if traits.contains(&tr.def_id()) => {
-                    if unsize_did == tr.def_id() {
-                        let sty = &tr.skip_binder().input_types().nth(1).unwrap().sty;
-                        if let ty::TyTuple(..) = sty {
-                            debug!("coerce_unsized: found unsized tuple coercion");
-                            has_unsized_tuple_coercion = true;
-                        }
-                    }
-                    tr.clone()
-                }
-                _ => {
-                    coercion.obligations.push(obligation);
-                    continue;
-                }
-            };
-            match selcx.select(&obligation.with(trait_ref)) {
-                // Uncertain or unimplemented.
-                Ok(None) |
-                Err(traits::Unimplemented) => {
-                    debug!("coerce_unsized: early return - can't prove obligation");
-                    return Err(TypeError::Mismatch);
-                }
-
-                // Object safety violations or miscellaneous.
-                Err(err) => {
-                    self.report_selection_error(&obligation, &err, false);
-                    // Treat this like an obligation and follow through
-                    // with the unsizing - the lack of a coercion should
-                    // be silent, as it causes a type mismatch later.
-                }
-
-                Ok(Some(vtable)) => {
-                    for obligation in vtable.nested_obligations() {
-                        queue.push_back(obligation);
-                    }
-                }
-            }
+        if self.predicate_must_hold(&predicate) {
+            coercion.obligations.push(predicate);
+            Ok(coercion)
+        } else {
+            Err(TypeError::Mismatch)
         }
-
-        if has_unsized_tuple_coercion && !self.tcx.features().unsized_tuple_coercion {
-            feature_gate::emit_feature_err(&self.tcx.sess.parse_sess,
-                                           "unsized_tuple_coercion",
-                                           self.cause.span,
-                                           feature_gate::GateIssue::Language,
-                                           feature_gate::EXPLAIN_UNSIZED_TUPLE_COERCION);
-        }
-
-        Ok(coercion)
     }
 
     fn coerce_from_safe_fn<F, G>(&self,
