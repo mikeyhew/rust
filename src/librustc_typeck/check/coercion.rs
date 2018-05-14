@@ -543,7 +543,7 @@ impl<'f, 'gcx, 'tcx> Coerce<'f, 'gcx, 'tcx> {
             &[coerce_target],
         );
 
-        if self.predicate_must_hold(&predicate) {
+        if self.predicate_may_hold(&predicate) {
             coercion.obligations.push(predicate);
             Ok(coercion)
         } else {
