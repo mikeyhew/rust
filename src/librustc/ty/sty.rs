@@ -521,16 +521,23 @@ impl<'a, 'gcx, 'tcx> Binder<ExistentialPredicate<'tcx>> {
     pub fn with_self_ty(&self, tcx: TyCtxt<'a, 'gcx, 'tcx>, self_ty: Ty<'tcx>)
         -> ty::Predicate<'tcx> {
         use ty::ToPredicate;
+
         match *self.skip_binder() {
-            ExistentialPredicate::Trait(tr) => Binder(tr).with_self_ty(tcx, self_ty).to_predicate(),
-            ExistentialPredicate::Projection(p) =>
-                ty::Predicate::Projection(Binder(p.with_self_ty(tcx, self_ty))),
-            ExistentialPredicate::AutoTrait(did) => {
-                let trait_ref = Binder(ty::TraitRef {
-                    def_id: did,
+            ExistentialPredicate::Trait(e_trait_ref) => {
+                self.map_bound_ref(|_| e_trait_ref)
+                    .with_self_ty(tcx, self_ty)
+                    .to_predicate()
+            }
+            ExistentialPredicate::Projection(e_projection) => {
+                self.map_bound_ref(|_| e_projection)
+                    .with_self_ty(tcx, self_ty)
+                    .to_predicate()
+            }
+            ExistentialPredicate::AutoTrait(def_id) => {
+                self.map_bound(|_| ty::TraitRef {
+                    def_id,
                     substs: tcx.mk_substs_trait(self_ty, &[]),
-                });
-                trait_ref.to_predicate()
+                }).to_predicate()
             }
         }
     }
@@ -570,7 +577,7 @@ impl<'tcx> Slice<ExistentialPredicate<'tcx>> {
 
 impl<'tcx> Binder<&'tcx Slice<ExistentialPredicate<'tcx>>> {
     pub fn principal(&self) -> Option<PolyExistentialTraitRef<'tcx>> {
-        self.skip_binder().principal().map(Binder::bind)
+        self.skip_binder().principal().map(|t|Binder::bind)
     }
 
     #[inline]
@@ -662,8 +669,11 @@ impl<'tcx> PolyTraitRef<'tcx> {
     }
 
     pub fn to_poly_trait_predicate(&self) -> ty::PolyTraitPredicate<'tcx> {
-        // Note that we preserve binding levels
-        Binder(ty::TraitPredicate { trait_ref: self.skip_binder().clone() })
+        self.map_bound_ref(|trait_ref| {
+            ty::TraitPredicate {
+                trait_ref: trait_ref.clone()
+            }
+        })
     }
 }
 
@@ -743,7 +753,10 @@ impl<'tcx> PolyExistentialTraitRef<'tcx> {
 /// type from `Binder<T>` to just `T` (see
 /// e.g. `liberate_late_bound_regions`).
 #[derive(Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, RustcEncodable, RustcDecodable)]
-pub struct Binder<T>(T);
+pub struct Binder<T> {
+    num_bound: u32,
+    value: T,
+}
 
 impl<T> Binder<T> {
     /// Wraps `value` in a binder, asserting that `value` does not
@@ -754,13 +767,20 @@ impl<T> Binder<T> {
         where T: TypeFoldable<'tcx>
     {
         assert!(!value.has_escaping_regions());
-        Binder(value)
+
+        Binder {
+            num_bound: 0,
+            value,
+        }
     }
 
     /// Wraps `value` in a binder, binding late-bound regions (if any).
-    pub fn bind<'tcx>(value: T) -> Binder<T>
+    pub fn bind<'tcx>(num_bound: u32, value: T) -> Binder<T>
     {
-        Binder(value)
+        Binder {
+            num_bound,
+            value,
+        }
     }
 
     /// Skips the binder and returns the "bound" value. This is a
@@ -780,11 +800,14 @@ impl<T> Binder<T> {
     /// - comparing the self type of a PolyTraitRef to see if it is equal to
     ///   a type parameter `X`, since the type `X`  does not reference any regions
     pub fn skip_binder(&self) -> &T {
-        &self.0
+        &self.value
     }
 
     pub fn as_ref(&self) -> Binder<&T> {
-        Binder(&self.0)
+        Binder {
+            num_bound: self.num_bound,
+            value: &self.value,
+        }
     }
 
     pub fn map_bound_ref<F, U>(&self, f: F) -> Binder<U>
@@ -796,7 +819,10 @@ impl<T> Binder<T> {
     pub fn map_bound<F, U>(self, f: F) -> Binder<U>
         where F: FnOnce(T) -> U
     {
-        Binder(f(self.0))
+        Binder {
+            num_bound: self.num_bound,
+            value: f(self.value)
+        }
     }
 
     /// Unwraps and returns the value within, but only if it contains
@@ -829,7 +855,12 @@ impl<T> Binder<T> {
     pub fn fuse<U,F,R>(self, u: Binder<U>, f: F) -> Binder<R>
         where F: FnOnce(T, U) -> R
     {
-        Binder(f(self.0, u.0))
+        assert_eq!(self.num_bound, u.num_bound);
+
+        Binder {
+            num_bound: self.num_bound,
+            value: f(self.value, u.value),
+        }
     }
 
     /// Split the contents into two things that share the same binder
@@ -841,8 +872,14 @@ impl<T> Binder<T> {
     pub fn split<U,V,F>(self, f: F) -> (Binder<U>, Binder<V>)
         where F: FnOnce(T) -> (U, V)
     {
-        let (u, v) = f(self.0);
-        (Binder(u), Binder(v))
+        let Binder {num_bound, value} = self;
+
+        let (u, v) = f(value);
+
+        (
+            Binder {num_bound, value: u},
+            Binder {num_bound, value: v},
+        )
     }
 }
 
