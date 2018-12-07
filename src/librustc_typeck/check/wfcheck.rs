@@ -795,7 +795,7 @@ fn receiver_is_valid<'fcx, 'tcx, 'gcx>(
     self_ty: Ty<'tcx>,
     arbitrary_self_types_enabled: bool,
 ) -> bool {
-    let cause = traits::ObligationCause::misc(span, fcx.body_id);
+    let cause = fcx.cause(span, traits::ObligationCauseCode::MethodReceiver);
 
     let can_eq_self = |ty| fcx.infcx.can_eq(fcx.param_env, self_ty, ty).is_ok();
 
