@@ -795,10 +795,14 @@ fn receiver_is_valid<'fcx, 'tcx, 'gcx>(
     self_ty: Ty<'tcx>,
     arbitrary_self_types_enabled: bool,
 ) -> bool {
-    // can_eq is all we need because there are no inference variables
-    let equals_self = |ty| fcx.infcx.can_eq(fcx.param_env, self_ty, ty).is_ok();
+    let cause = traits::ObligationCause::misc(span, fcx.body_id);
 
-    if equals_self(receiver_ty) {
+    let can_eq_self = |ty| fcx.infcx.can_eq(fcx.param_env, self_ty, ty).is_ok();
+
+    if can_eq_self(receiver_ty) {
+        if let Some(mut err) = fcx.demand_eqtype_with_origin(&cause, self_ty, receiver_ty) {
+            err.emit();
+        }
         return true
     }
 
@@ -811,25 +815,23 @@ fn receiver_is_valid<'fcx, 'tcx, 'gcx>(
     // skip the first type, we know its not equal to `self_ty`
     autoderef.next();
 
-    loop {
+    let potential_self_ty = loop {
         if let Some((potential_self_ty, _)) = autoderef.next() {
             debug!("receiver_is_valid: potential self type `{:?}` to match `{:?}`",
                 potential_self_ty, self_ty);
 
-            if equals_self(potential_self_ty) {
-                break
+            if can_eq_self(potential_self_ty) {
+                break potential_self_ty
             }
         } else {
             debug!("receiver_is_valid: type `{:?}` does not deref to `{:?}`",
                 receiver_ty, self_ty);
             return false
         }
-    }
+    };
 
     if !arbitrary_self_types_enabled {
         // check that receiver_ty: Receiver<Target=self_ty>
-
-        let cause = traits::ObligationCause::misc(span, fcx.body_id);
 
         let receiver_trait_def_id = match fcx.tcx.lang_items().receiver_trait() {
             Some(did) => did,
@@ -878,7 +880,7 @@ fn receiver_is_valid<'fcx, 'tcx, 'gcx>(
         }).to_predicate();
 
         let deref_obligation = traits::Obligation::new(
-            cause,
+            cause.clone(),
             fcx.param_env,
             projection_predicate,
         );
@@ -889,6 +891,12 @@ fn receiver_is_valid<'fcx, 'tcx, 'gcx>(
             return false
         }
     }
+
+    if let Some(mut err) = fcx.demand_eqtype_with_origin(&cause, self_ty, potential_self_ty) {
+        err.emit();
+    }
+
+    autoderef.finalize();
 
     true
 }
