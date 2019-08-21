@@ -1,5 +1,6 @@
 use crate::session::{self, DataTypeKind};
-use crate::ty::{self, Ty, TyCtxt, TypeFoldable, ReprOptions, subst::SubstsRef};
+use crate::ty::{self, Ty, TyCtxt, TypeFoldable, ReprOptions, subst::SubstsRef, ToPredicate};
+use crate::traits::Reveal;
 
 use syntax::ast::{self, Ident, IntTy, UintTy};
 use syntax::attr;
@@ -2529,56 +2530,61 @@ where
 
     fn new_vtable(cx: &C, sig: ty::FnSig<'tcx>, extra_args: &[Ty<'tcx>]) -> Self {
         FnTypeExt::new_internal(cx, sig, extra_args, |ty, arg_idx| {
-            let mut layout = cx.layout_of(ty);
-            // Don't pass the vtable, it's not an argument of the virtual fn.
-            // Instead, pass just the data pointer, but give it the type `*const/mut dyn Trait`
-            // or `&/&mut dyn Trait` because this is special-cased elsewhere in codegen
             if arg_idx == Some(0) {
-                let fat_pointer_ty = if layout.is_unsized() {
-                    // unsized `self` is passed as a pointer to `self`
-                    // FIXME (mikeyhew) change this to use &own if it is ever added to the language
-                    cx.tcx().mk_mut_ptr(layout.ty)
-                } else {
-                    match layout.abi {
-                        Abi::ScalarPair(..) => (),
-                        _ => bug!("receiver type has unsupported layout: {:?}", layout),
-                    }
+                let tcx = cx.tcx();
+                let receiver_ty = ty;
+                debug!("new_vtable: receiver_ty = {:?}", receiver_ty);
 
-                    // In the case of Rc<Self>, we need to explicitly pass a *mut RcBox<Self>
-                    // with a Scalar (not ScalarPair) ABI. This is a hack that is understood
-                    // elsewhere in the compiler as a method on a `dyn Trait`.
-                    // To get the type `*mut RcBox<Self>`, we just keep unwrapping newtypes until we
-                    // get a built-in pointer type
-                    let mut fat_pointer_layout = layout;
-                    'descend_newtypes: while !fat_pointer_layout.ty.is_unsafe_ptr()
-                        && !fat_pointer_layout.ty.is_region_ptr()
-                    {
-                        'iter_fields: for i in 0..fat_pointer_layout.fields.count() {
-                            let field_layout = fat_pointer_layout.field(cx, i);
-
-                            if !field_layout.is_zst() {
-                                fat_pointer_layout = field_layout;
-                                continue 'descend_newtypes;
-                            }
-                        }
-
-                        bug!(
-                            "receiver has no non-zero-sized fields {:?}",
-                            fat_pointer_layout
-                        );
-                    }
-
-                    fat_pointer_layout.ty
+                // represents the erased Self type of the `dyn Trait` type. This is some unknown,
+                // sized type that implements Trait. Since we don't know the actual type,
+                // we fudge it with a type parameter and add a Sized bound for it to the param env
+                // when calculating the layout
+                let dispatched_self_ty = {
+                    // let param_name = syntax::symbol::InternedString::intern("DispatchedSelfType");
+                    // tcx.mk_ty_param(0, param_name)
+                    tcx.mk_unit()
                 };
 
-                // we now have a type like `*mut RcBox<dyn Trait>`
-                // change its layout to that of `*mut ()`, a thin pointer, but keep the same type
-                // this is understood as a special case elsewhere in the compiler
-                let unit_pointer_ty = cx.tcx().mk_mut_ptr(cx.tcx().mk_unit());
-                layout = cx.layout_of(unit_pointer_ty);
-                layout.ty = fat_pointer_ty;
+                let param_env = {
+                    let sized_trait = tcx.lang_items().sized_trait().unwrap_or_else(|| {
+                        bug!("new_vtable: missing sized_trait")
+                    });
+
+                    let sized_predicate = ty::TraitRef {
+                        def_id: sized_trait,
+                        substs: tcx.mk_substs_trait(dispatched_self_ty, &[]),
+                    }.to_predicate();
+
+                    ty::ParamEnv {
+                        caller_bounds: tcx.intern_predicates(&[sized_predicate]),
+                        reveal: Reveal::All,
+                        def_id: None,
+                    }
+                };
+
+                let dispatched_receiver_ty = if cx.layout_of(receiver_ty).is_unsized() {
+                    // unsized method receivers are passed behind a pointer
+                    // FIXME (mikeyhew) if &own/&move is ever added, use it instead of *mut
+                    let pointee_ty = tcx.dispatched_pointee_ty(receiver_ty, dispatched_self_ty);
+                    tcx.mk_mut_ptr(pointee_ty)
+                } else {
+                    tcx.dispatched_receiver_ty(receiver_ty, dispatched_self_ty)
+                };
+
+                debug!("new_vtable: dispatched_receiver_ty = {:?}", dispatched_receiver_ty);
+
+                let layout = tcx.layout_of(param_env.and(dispatched_receiver_ty))
+                    .unwrap_or_else(|err| bug!(
+                        "new_vtable: error computing layout for type {:?}: {}",
+                        dispatched_receiver_ty, err
+                    ));
+
+                debug!("new_vtable: dispatched receiver layout = {:?}", layout);
+
+                return ArgType::new(layout)
             }
-            ArgType::new(layout)
+
+            ArgType::new(cx.layout_of(ty))
         })
     }
 

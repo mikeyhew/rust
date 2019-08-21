@@ -736,6 +736,12 @@ impl<'a, 'tcx> CrateMetadata {
         self.get_impl_data(id).coerce_unsized_info
     }
 
+    crate fn get_dispatch_from_dyn_info(
+        &self, id: DefIndex
+    ) -> Option<ty::adjustment::DispatchFromDynInfo> {
+        self.get_impl_data(id).dispatch_from_dyn_info
+    }
+
     crate fn get_impl_trait(&self, id: DefIndex, tcx: TyCtxt<'tcx>) -> Option<ty::TraitRef<'tcx>> {
         self.root.per_def.impl_trait_ref.get(self, id).map(|tr| tr.decode((self, tcx)))
     }

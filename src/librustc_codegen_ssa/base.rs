@@ -256,6 +256,73 @@ pub fn coerce_unsized_into<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     }
 }
 
+/// extracts the vtable from src, placing the thin pointer into dst. returns the vtable
+pub fn remove_vtable<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
+    bx: &mut Bx,
+    src: PlaceRef<'tcx, Bx::Value>,
+    dst: PlaceRef<'tcx, Bx::Value>,
+) -> Bx::Value {
+    debug!("remove_vtable(src={:?}, dst={:?})", src, dst);
+
+    let src_ty = src.layout.ty;
+    let dst_ty = dst.layout.ty;
+
+    match (&src_ty.sty, &dst_ty.sty) {
+        (&ty::Ref(..), &ty::Ref(..)) |
+        (&ty::RawPtr(..), &ty::RawPtr(..)) => {
+            let operand = bx.load_operand(src);
+            debug!("remove_vtable: removing vtable from builtin pointer, operand={:?}", operand);
+            match operand.val {
+                OperandValue::Pair(data_ptr, vtable) => {
+                    let data_ptr = bx.pointercast(data_ptr, bx.cx().backend_type(dst.layout));
+                    OperandValue::Immediate(data_ptr).store(bx, dst);
+                    vtable
+                }
+                OperandValue::Immediate(..) | OperandValue::Ref(..) => {
+                    bug!("expected builtin fat pointer to be a Pair, found {:?}", operand.val)
+                }
+            }
+        }
+
+        (&ty::Adt(def_a, _), &ty::Adt(def_b, _)) => {
+            assert_eq!(def_a, def_b);
+
+            let mut vtable = None;
+
+            for i in 0..def_a.non_enum_variant().fields.len() {
+                let src_f = src.project_field(bx, i);
+                let dst_f = dst.project_field(bx, i);
+
+                if dst_f.layout.is_zst() {
+                    continue;
+                }
+
+                debug!(
+                    "remove_vtable: field {} named `{}`. src_f ty = {:?}, dst_f ty = {:?}",
+                    i, def_a.non_enum_variant().fields[i].ident, src_f.layout.ty, dst_f.layout.ty,
+                );
+
+                if src_f.layout.ty == dst_f.layout.ty {
+                    debug!("remove_vtable: copying field");
+
+                    memcpy_ty(
+                        bx, dst_f.llval, dst_f.align, src_f.llval, src_f.align,
+                        src_f.layout, MemFlags::empty(),
+                    );
+                } else {
+                    assert!(vtable.is_none());
+                    debug!("remove_vtable: found pointer field, recursing");
+                    vtable = Some(remove_vtable(bx, src_f, dst_f));
+                }
+            }
+
+            vtable.unwrap_or_else(|| bug!("no field with a vtable"))
+        }
+
+        (src, dst) => bug!("remove_vtable: unexpected types: {:?} and {:?}", src, dst)
+    }
+}
+
 pub fn cast_shift_expr_rhs<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     bx: &mut Bx,
     op: hir::BinOpKind,

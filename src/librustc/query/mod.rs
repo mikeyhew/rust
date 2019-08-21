@@ -367,6 +367,9 @@ rustc_queries! {
         /// Caches `CoerceUnsized` kinds for impls on custom types.
         query coerce_unsized_info(_: DefId)
             -> ty::adjustment::CoerceUnsizedInfo {}
+
+        query dispatch_from_dyn_info(_: DefId)
+            -> ty::adjustment::DispatchFromDynInfo {}
     }
 
     TypeChecking {

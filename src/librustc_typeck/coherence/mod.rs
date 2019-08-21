@@ -110,7 +110,7 @@ fn enforce_empty_impls_for_marker_traits(tcx: TyCtxt<'_>, impl_def_id: DefId, tr
 }
 
 pub fn provide(providers: &mut Providers<'_>) {
-    use self::builtin::coerce_unsized_info;
+    use self::builtin::{coerce_unsized_info, dispatch_from_dyn_info};
     use self::inherent_impls::{crate_inherent_impls, inherent_impls};
     use self::inherent_impls_overlap::crate_inherent_impls_overlap_check;
 
@@ -120,6 +120,7 @@ pub fn provide(providers: &mut Providers<'_>) {
         inherent_impls,
         crate_inherent_impls_overlap_check,
         coerce_unsized_info,
+        dispatch_from_dyn_info,
         ..*providers
     };
 }

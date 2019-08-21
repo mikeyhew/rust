@@ -357,62 +357,6 @@ impl<'tcx> TyCtxt<'tcx> {
         if receiver_ty != self.types.self_param {
             if !self.receiver_is_dispatchable(method, receiver_ty) {
                 return Some(MethodViolationCode::UndispatchableReceiver);
-            } else {
-                // Do sanity check to make sure the receiver actually has the layout of a pointer.
-
-                use crate::ty::layout::Abi;
-
-                let param_env = self.param_env(method.def_id);
-
-                let abi_of_ty = |ty: Ty<'tcx>| -> &Abi {
-                    match self.layout_of(param_env.and(ty)) {
-                        Ok(layout) => &layout.abi,
-                        Err(err) => bug!(
-                            "error: {}\n while computing layout for type {:?}", err, ty
-                        )
-                    }
-                };
-
-                // e.g., `Rc<()>`
-                let unit_receiver_ty = self.receiver_for_self_ty(
-                    receiver_ty, self.mk_unit(), method.def_id
-                );
-
-                match abi_of_ty(unit_receiver_ty) {
-                    &Abi::Scalar(..) => (),
-                    abi => {
-                        self.sess.delay_span_bug(
-                            self.def_span(method.def_id),
-                            &format!(
-                                "receiver when `Self = ()` should have a Scalar ABI; found {:?}",
-                                abi
-                            ),
-                        );
-                    }
-                }
-
-                let trait_object_ty = self.object_ty_for_trait(
-                    trait_def_id, self.mk_region(ty::ReStatic)
-                );
-
-                // e.g., `Rc<dyn Trait>`
-                let trait_object_receiver = self.receiver_for_self_ty(
-                    receiver_ty, trait_object_ty, method.def_id
-                );
-
-                match abi_of_ty(trait_object_receiver) {
-                    &Abi::ScalarPair(..) => (),
-                    abi => {
-                        self.sess.delay_span_bug(
-                            self.def_span(method.def_id),
-                            &format!(
-                                "receiver when `Self = {}` should have a ScalarPair ABI; \
-                                 found {:?}",
-                                trait_object_ty, abi
-                            ),
-                        );
-                    }
-                }
             }
         }
 
@@ -440,57 +384,6 @@ impl<'tcx> TyCtxt<'tcx> {
         debug!("receiver_for_self_ty({:?}, {:?}, {:?}) = {:?}",
                receiver_ty, self_ty, method_def_id, result);
         result
-    }
-
-    /// Creates the object type for the current trait. For example,
-    /// if the current trait is `Deref`, then this will be
-    /// `dyn Deref<Target = Self::Target> + 'static`.
-    fn object_ty_for_trait(self, trait_def_id: DefId, lifetime: ty::Region<'tcx>) -> Ty<'tcx> {
-        debug!("object_ty_for_trait: trait_def_id={:?}", trait_def_id);
-
-        let trait_ref = ty::TraitRef::identity(self, trait_def_id);
-
-        let trait_predicate = ty::ExistentialPredicate::Trait(
-            ty::ExistentialTraitRef::erase_self_ty(self, trait_ref)
-        );
-
-        let mut associated_types = traits::supertraits(self, ty::Binder::dummy(trait_ref))
-            .flat_map(|super_trait_ref| {
-                self.associated_items(super_trait_ref.def_id())
-                    .map(move |item| (super_trait_ref, item))
-            })
-            .filter(|(_, item)| item.kind == ty::AssocKind::Type)
-            .collect::<Vec<_>>();
-
-        // existential predicates need to be in a specific order
-        associated_types.sort_by_cached_key(|(_, item)| self.def_path_hash(item.def_id));
-
-        let projection_predicates = associated_types.into_iter().map(|(super_trait_ref, item)| {
-            // We *can* get bound lifetimes here in cases like
-            // `trait MyTrait: for<'s> OtherTrait<&'s T, Output=bool>`.
-            //
-            // binder moved to (*)...
-            let super_trait_ref = super_trait_ref.skip_binder();
-            ty::ExistentialPredicate::Projection(ty::ExistentialProjection {
-                ty: self.mk_projection(item.def_id, super_trait_ref.substs),
-                item_def_id: item.def_id,
-                substs: super_trait_ref.substs,
-            })
-        });
-
-        let existential_predicates = self.mk_existential_predicates(
-            iter::once(trait_predicate).chain(projection_predicates)
-        );
-
-        let object_ty = self.mk_dynamic(
-            // (*) ... binder re-introduced here
-            ty::Binder::bind(existential_predicates),
-            lifetime,
-        );
-
-        debug!("object_ty_for_trait: object_ty=`{}`", object_ty);
-
-        object_ty
     }
 
     /// Checks the method's receiver (the `self` argument) can be dispatched on when `Self` is a

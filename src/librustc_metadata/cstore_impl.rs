@@ -122,6 +122,11 @@ provide! { <'tcx> tcx, def_id, other, cdata,
             bug!("coerce_unsized_info: `{:?}` is missing its info", def_id);
         })
     }
+    dispatch_from_dyn_info => {
+        cdata.get_dispatch_from_dyn_info(def_id.index).unwrap_or_else(|| {
+            bug!("dispatch_from_dyn_info: `{:?}` is missing its info", def_id);
+        })
+    }
     optimized_mir => { tcx.arena.alloc(cdata.get_optimized_mir(tcx, def_id.index)) }
     promoted_mir => { tcx.arena.alloc(cdata.get_promoted_mir(tcx, def_id.index)) }
     mir_const_qualif => {

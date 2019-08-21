@@ -8,6 +8,7 @@ use crate::mir::interpret::{sign_extend, truncate};
 use crate::ich::NodeIdHashingMode;
 use crate::traits::{self, ObligationCause};
 use crate::ty::{self, DefIdTree, Ty, TyCtxt, GenericParamDefKind, TypeFoldable};
+use crate::ty::adjustment::{DispatchFromDynInfo, ReceiverKind};
 use crate::ty::subst::{Subst, InternalSubsts, SubstsRef, GenericArgKind};
 use crate::ty::query::TyCtxtAt;
 use crate::ty::TyKind::*;
@@ -19,7 +20,7 @@ use crate::middle::lang_items;
 use rustc_data_structures::stable_hasher::{StableHasher, HashStable};
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_macros::HashStable;
-use std::{cmp, fmt};
+use std::{cmp, fmt, iter};
 use syntax::ast;
 use syntax::attr::{self, SignedInt, UnsignedInt};
 use syntax_pos::{Span, DUMMY_SP};
@@ -765,6 +766,121 @@ impl<'tcx> TyCtxt<'tcx> {
             Err(expanded_type)
         } else {
             Ok(expanded_type)
+        }
+    }
+
+    pub fn dispatch_from_dyn_info_for_adt_def(
+        self, adt_def: &'tcx ty::AdtDef
+    ) -> DispatchFromDynInfo {
+        debug!("dispatch_from_dyn_info_for_adt_def(adt_def={:?})", adt_def);
+
+        let dispatch_from_dyn_trait = self.lang_items().dispatch_from_dyn_trait()
+            .unwrap_or_else(|| bug!("DispatchFromDyn trait not found"));
+
+        let mut impl_did = None;
+
+        self.for_each_impl(dispatch_from_dyn_trait, |did| {
+            let trait_ref = self.impl_trait_ref(did)
+                .unwrap_or_else(|| bug!("not an impl: {:?}", did));
+
+            match trait_ref.self_ty().sty {
+                ty::Adt(def, _) if def.did == adt_def.did => {
+                    impl_did = Some(did);
+                },
+                _ => ()
+            }
+        });
+
+        let impl_did = impl_did.unwrap_or_else(|| {
+            bug!("dispatch_from_dyn_info_for_adt_def: no impl for adt_def: {:?}", adt_def)
+        });
+
+        self.dispatch_from_dyn_info(impl_did)
+    }
+
+    fn replace_type_arg(
+        self, substs: SubstsRef<'tcx>, index: usize, new_ty: Ty<'tcx>
+    ) -> SubstsRef<'tcx> {
+        let new_substs = substs.iter().take(index).cloned().chain(
+            iter::once(new_ty.into()).chain(
+                substs.iter().skip(index + 1).cloned(),
+            ),
+        );
+
+        self.mk_substs(new_substs)
+    }
+
+    fn type_param_index_of_struct_tail(
+        self, adt_def: &'tcx ty::AdtDef,
+    ) -> usize {
+        let substs = InternalSubsts::identity_for_item(self, adt_def.did);
+        let struct_ty = self.mk_adt(adt_def, substs);
+        let tail = self.struct_tail_erasing_lifetimes(struct_ty, self.param_env(adt_def.did));
+
+        match &tail.sty {
+            ty::Param(ty::ParamTy {index, ..}) => *index as usize,
+            ty => bug!("expected struct tail to be a type parameter, found {:?}", ty)
+        }
+    }
+
+    pub fn dispatched_pointee_ty(
+        self, dyn_pointee_ty: Ty<'tcx>, dispatched_self_ty: Ty<'tcx>,
+    ) -> Ty<'tcx> {
+        match &dyn_pointee_ty.sty {
+            ty::Dynamic(..) => dispatched_self_ty,
+            ty::Adt(adt_def, substs) => {
+                let index = self.type_param_index_of_struct_tail(adt_def);
+                let arg_ty = substs[index].expect_ty();
+                let dispatched_arg_ty = self.dispatched_pointee_ty(arg_ty, dispatched_self_ty);
+                let new_substs = self.replace_type_arg(substs, index, dispatched_arg_ty);
+
+                self.mk_adt(adt_def, new_substs)
+            }
+            ty => bug!("unexpected pointee type: {:?}", ty)
+        }
+    }
+
+    pub fn dispatched_receiver_ty(
+        self, dyn_receiver_ty: Ty<'tcx>, dispatched_self_ty: Ty<'tcx>,
+    ) -> Ty<'tcx> {
+        match dyn_receiver_ty.sty {
+            ty::Dynamic(..) => dispatched_self_ty,
+            ty::RawPtr(ty::TypeAndMut {ty, mutbl}) => {
+                self.mk_ptr(ty::TypeAndMut {
+                    ty: self.dispatched_pointee_ty(ty, dispatched_self_ty),
+                    mutbl,
+                })
+            }
+            ty::Ref(re, ty, mutbl) => {
+                self.mk_ty(ty::Ref(
+                    re,
+                    self.dispatched_pointee_ty(ty, dispatched_self_ty),
+                    mutbl,
+                ))
+            }
+            ty::Adt(adt_def, substs) => {
+                let DispatchFromDynInfo {type_param_index, receiver_kind, ..} =
+                    self.dispatch_from_dyn_info_for_adt_def(adt_def);
+                debug!("dispatched_receiver_ty: type_param_index = {:?}", type_param_index);
+
+                // handle pointer (dispatched_pointee_ty) vs wrapper (dispatched_receiver_ty)
+                // this info needs to come from the DispatchFromDynInfo
+
+                let ty = substs[type_param_index].expect_ty();
+                let dispatched_ty = match receiver_kind {
+                    ReceiverKind::Pointer => self.dispatched_pointee_ty(ty, dispatched_self_ty),
+                    ReceiverKind::Wrapper => self.dispatched_receiver_ty(ty, dispatched_self_ty),
+                };
+
+                let new_substs = substs.iter().take(type_param_index).cloned().chain(
+                    iter::once(dispatched_ty.into()).chain(
+                        substs.iter().skip(type_param_index + 1).cloned(),
+                    ),
+                );
+
+                self.mk_adt(adt_def, self.mk_substs(new_substs))
+            }
+            _ => bug!("dispatched_receiver_ty: unexpected receiver type: {:?}", dyn_receiver_ty.sty)
         }
     }
 }

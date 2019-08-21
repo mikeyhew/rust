@@ -177,3 +177,16 @@ pub enum CustomCoerceUnsized {
     /// Records the index of the field being coerced.
     Struct(usize)
 }
+
+#[derive(Clone, Copy, RustcEncodable, RustcDecodable, Debug, HashStable)]
+pub enum ReceiverKind {
+    Wrapper,
+    Pointer,
+}
+
+#[derive(Clone, Copy, RustcEncodable, RustcDecodable, Debug, HashStable)]
+pub struct DispatchFromDynInfo {
+    pub type_param_index: usize,
+    pub field_index: usize,
+    pub receiver_kind: ReceiverKind,
+}

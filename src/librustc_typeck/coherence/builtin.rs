@@ -9,8 +9,9 @@ use rustc::middle::lang_items::UnsizeTraitLangItem;
 use rustc::traits::{self, TraitEngine, ObligationCause};
 use rustc::ty::{self, Ty, TyCtxt};
 use rustc::ty::TypeFoldable;
-use rustc::ty::adjustment::CoerceUnsizedInfo;
+use rustc::ty::adjustment::{CoerceUnsizedInfo, DispatchFromDynInfo, ReceiverKind};
 use rustc::ty::util::CopyImplementationError;
+use rustc::ty::subst::UnpackedKind;
 use rustc::infer;
 
 use rustc::hir::def_id::DefId;
@@ -211,39 +212,21 @@ fn visit_implementation_of_dispatch_from_dyn(tcx: TyCtxt<'_>, impl_did: DefId) {
                         return
                     }
 
-                    if def_a.repr.c() || def_a.repr.packed() {
-                        create_err(
-                            "structs implementing `DispatchFromDyn` may not have \
-                             `#[repr(packed)]` or `#[repr(C)]`"
-                        ).emit();
-                    }
-
                     let fields = &def_a.non_enum_variant().fields;
 
                     let coerced_fields = fields.iter().filter_map(|field| {
+                        // skip PhantomData fields, they are allowed to change and do not count as
+                        // the pointer field
+                        if tcx.type_of(field.did).is_phantom_data() {
+                            return None
+                        }
+
                         let ty_a = field.ty(tcx, substs_a);
                         let ty_b = field.ty(tcx, substs_b);
 
-                        if let Ok(layout) = tcx.layout_of(param_env.and(ty_a)) {
-                            if layout.is_zst() && layout.details.align.abi.bytes() == 1 {
-                                // ignore ZST fields with alignment of 1 byte
-                                return None;
-                            }
-                        }
-
                         if let Ok(ok) = infcx.at(&cause, param_env).eq(ty_a, ty_b) {
                             if ok.obligations.is_empty() {
-                                create_err(
-                                    "the trait `DispatchFromDyn` may only be implemented \
-                                     for structs containing the field being coerced, \
-                                     ZST fields with 1 byte alignment, and nothing else"
-                                ).note(
-                                    &format!(
-                                        "extra field `{}` of type `{}` is not allowed",
-                                        field.ident, ty_a,
-                                    )
-                                ).emit();
-
+                                // field is unchanged, skip it
                                 return None;
                             }
                         }
@@ -309,6 +292,11 @@ fn visit_implementation_of_dispatch_from_dyn(tcx: TyCtxt<'_>, impl_did: DefId) {
                             &outlives_env,
                             SuppressRegionErrors::default(),
                         );
+
+                        // if we get here, there should not be any errors in the impl.
+                        // call this query so it runs while the impl is local, and ends up
+                        // in the query cache
+                        tcx.at(span).dispatch_from_dyn_info(impl_did);
                     }
                 }
                 _ => {
@@ -318,7 +306,110 @@ fn visit_implementation_of_dispatch_from_dyn(tcx: TyCtxt<'_>, impl_did: DefId) {
                     ).emit();
                 }
             }
-        })
+        });
+    }
+}
+
+pub fn dispatch_from_dyn_info<'tcx>(gcx: TyCtxt<'tcx>, impl_did: DefId) -> DispatchFromDynInfo {
+    debug!("dispatch_from_dyn_info(impl_did={:?})", impl_did);
+
+    let dispatch_from_dyn_trait = gcx.lang_items().dispatch_from_dyn_trait().unwrap();
+
+    // this provider should only get invoked for local def-ids
+    let impl_hir_id = gcx.hir().as_local_hir_id(impl_did).unwrap_or_else(|| {
+        bug!("dispatch_from_dyn_info: invoked for non-local def-id {:?}", impl_did)
+    });
+
+    let span = gcx.hir().span(impl_hir_id);
+    let param_env = gcx.param_env(impl_did);
+
+    let source = gcx.type_of(impl_did);
+    let trait_ref = gcx.impl_trait_ref(impl_did).unwrap();
+    assert_eq!(trait_ref.def_id, dispatch_from_dyn_trait);
+    let target = trait_ref.substs.type_at(1);
+    debug!(
+        "dispatch_from_dyn_info: {:?} -> {:?}",
+        source, target
+    );
+
+    match (&source.sty, &target.sty) {
+        (
+            &ty::Adt(def_a, substs_a),
+            &ty::Adt(def_b, substs_b),
+        ) => {
+            if def_a != def_b {
+                bug!("dispatch_from_dyn_info: invalid impl, has different adt defs")
+            }
+
+            gcx.infer_ctxt().enter(|infcx| {
+                let cause = ObligationCause::misc(span, impl_hir_id);
+
+                let type_param_index = substs_a.iter()
+                    .zip(substs_b.iter())
+                    .enumerate()
+                    .find_map(|(i, (ty_a, ty_b))| {
+                        let (ty_a, ty_b) = match ty_a.unpack() {
+                            UnpackedKind::Type(ty_a) => (ty_a, ty_b.expect_ty()),
+                            _ => return None,
+                        };
+
+                        if let Ok(inf_ok) = infcx.at(&cause, param_env).eq(ty_a, ty_b) {
+                            if inf_ok.obligations.is_empty() {
+                                return None
+                            }
+                        }
+
+                        Some(i)
+                    }).unwrap_or_else(|| {
+                        bug!("dispatch_from_dyn_info: cannot find a type param \
+                            that changes")
+                    });
+
+                let (field_index, field) = if def_a.is_struct() {
+                    def_a.non_enum_variant().fields.iter()
+                        .enumerate()
+                        .find_map(|(i, field)| {
+                            let ty_a = field.ty(gcx, substs_a);
+                            let ty_b = field.ty(gcx, substs_b);
+
+                            if ty_a.is_phantom_data() {
+                                return None
+                            }
+
+                            if let Ok(inf_ok) = infcx.at(&cause, param_env).eq(ty_a, ty_b) {
+                                if inf_ok.obligations.is_empty() {
+                                    return None
+                                }
+                            }
+
+                            Some((i, field))
+                        }).unwrap_or_else(|| {
+                            bug!("dispatch_from_dyn_info: cannot find a \
+                                non-PhantomData field whose type changes")
+                        })
+                } else {
+                    bug!("dispatch_from_dyn_info: expected Self type to be a struct")
+                };
+
+                // TODO: need to normalize field type?
+                let receiver_kind = match &gcx.type_of(field.did).sty {
+                    ty::Param(..) => ReceiverKind::Wrapper,
+                    ty::Ref(..) | ty::RawPtr(..) => ReceiverKind::Pointer,
+                    ty::Adt(def, _) => {
+                        // TODO: add test to make sure recursive types don't
+                        // produce query cycles
+                        // also TODO: this will probably ICE if the field's type has an error
+                        // in its DispatchFromDyn impl
+                        gcx.dispatch_from_dyn_info_for_adt_def(def).receiver_kind
+                    }
+                    ty => bug!("unexpected pointer field type: {:?}", ty),
+                };
+
+                DispatchFromDynInfo {type_param_index, field_index, receiver_kind}
+            })
+        }
+        _ => bug!("dispatch_from_dyn_info: should only be called on impls for \
+            struct types. Called on impl for {:?} -> {:?}", source.sty, target.sty)
     }
 }
 
