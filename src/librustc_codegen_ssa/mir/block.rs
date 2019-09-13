@@ -709,6 +709,8 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     Pair(data_ptr, vtable) => {
                         debug!("codegen_call_terminator receiver: Pair({:?}, {:?})",
                             data_ptr, vtable);
+                        // a normal fat pointer - either a builtin pointer type, or a newtype
+                        // wrapper around one
                         let layout = thin_ptr_layout(op.layout.ty);
                         let llty = bx.cx().immediate_backend_type(layout);
                         let op = OperandRef {
@@ -734,11 +736,11 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         };
                         (vtable, op)
                     }
-                    Ref(llref, None, align) => {
+                    Ref(llref, None, _) => {
+                        debug!("codegen_call_terminator: Ref({:?}, None, _)", llref);
                         // dynamic dispatch on a nontrivial struct
-                        debug!("codegen_call_terminator: nontrivial struct");
 
-                        let source = PlaceRef::new_sized(llref, op.layout, align);
+                        let source = PlaceRef::new_sized(llref, op.layout);
 
                         let dest = {
                             let layout = thin_ptr_layout(op.layout.ty);
