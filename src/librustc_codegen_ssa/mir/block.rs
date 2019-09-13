@@ -722,7 +722,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                     Immediate(..) => {
                         bug!("fat pointer should not be a single immediate value. op = {:?}", op)
                     }
-                    Ref(data_ptr, Some(vtable), _) => {
+                    Ref(data_ptr, Some(vtable), align) => {
                         debug!("codegen_call_terminator receiver: Ref({:?}, Some({:?}), _)",
                             data_ptr, vtable);
                         // unsized, by-value `self`. op.layout.ty is the unsized type,
@@ -732,7 +732,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
                         let llty = bx.cx().immediate_backend_type(layout);
                         let op = OperandRef {
                             layout,
-                            val: Immediate(bx.pointercast(data_ptr, llty)),
+                            val: Ref(bx.pointercast(data_ptr, llty), None, align),
                         };
                         (vtable, op)
                     }
