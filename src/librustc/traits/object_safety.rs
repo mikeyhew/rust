@@ -350,14 +350,8 @@ impl<'tcx> TyCtxt<'tcx> {
             &sig.map_bound(|sig| sig.inputs()[0]),
         );
 
-        // Until `unsized_locals` is fully implemented, `self: Self` can't be dispatched on.
-        // However, this is already considered object-safe. We allow it as a special case here.
-        // FIXME(mikeyhew) get rid of this `if` statement once `receiver_is_dispatchable` allows
-        // `Receiver: Unsize<Receiver[Self => dyn Trait]>`.
-        if receiver_ty != self.types.self_param {
-            if !self.receiver_is_dispatchable(method, receiver_ty) {
-                return Some(MethodViolationCode::UndispatchableReceiver);
-            }
+        if !self.receiver_is_dispatchable(method, receiver_ty) {
+            return Some(MethodViolationCode::UndispatchableReceiver);
         }
 
         None
@@ -387,34 +381,36 @@ impl<'tcx> TyCtxt<'tcx> {
     }
 
     /// Checks the method's receiver (the `self` argument) can be dispatched on when `Self` is a
-    /// trait object. We require that `DispatchableFromDyn` be implemented for the receiver type
-    /// in the following way:
-    /// - let `Receiver` be the type of the `self` argument, i.e `Self`, `&Self`, `Rc<Self>`,
-    /// - require the following bound:
+    /// trait object. The rule is as follows:
+    /// - let `Receiver` be the type of the `self` argument, e.g. `Self`, `&Self`, `Rc<Self>`,
+    ///   `ManuallyDrop<Self>`, `&ManuallyDrop<Self>`
+    /// - let `T[X => U]` mean the type `T` where all occurences of parameter `X` are replaced with
+    ///   the type `U` (substitution notation)
+    /// - we require that, if `Self: Unsize<dyn Trait>`, one of the following predicates holds
+    ///     1. `Receiver: DispatchFromDyn<Receiver[Self => dyn Trait]>`
+    ///     2. `Receiver: Unsize<Receiver[Self => dyn Trait]>`
     ///
-    ///   ```
-    ///   Receiver[Self => T]: DispatchFromDyn<Receiver[Self => dyn Trait]>
-    ///   ```
-    ///
-    ///   where `Foo[X => Y]` means "the same type as `Foo`, but with `X` replaced with `Y`"
-    ///   (substitution notation).
-    ///
-    /// Some examples of receiver types and their required obligation:
-    /// - `&'a mut self` requires `&'a mut Self: DispatchFromDyn<&'a mut dyn Trait>`,
-    /// - `self: Rc<Self>` requires `Rc<Self>: DispatchFromDyn<Rc<dyn Trait>>`,
-    /// - `self: Pin<Box<Self>>` requires `Pin<Box<Self>>: DispatchFromDyn<Pin<Box<dyn Trait>>>`.
+    /// Some examples of receiver types and their associated predicates
+    /// - `&'a mut self` satisfies `&'a mut Self: DispatchFromDyn<&'a mut dyn Trait>`
+    /// - `self: Rc<Self>` satisfies `Rc<Self>: DispatchFromDyn<Rc<dyn Trait>>`
+    /// - `self: Pin<Box<Self>>` satisfies `Pin<Box<Self>>: DispatchFromDyn<Pin<Box<dyn Trait>>>`
+    /// - `self: &ManuallyDrop<Self>` satisfies
+    ///     `&ManuallyDrop<Self>: DispatchFromDyn<&ManuallyDrop<dyn Trait>`
+    /// - `self` satisfies `Self: Unsize<dyn Trait>`
+    /// - `self: ManuallyDrop<Self>` satisfies `ManuallyDrop<Self>: Unsize<ManuallyDrop<dyn Trait>>`
     ///
     /// The only case where the receiver is not dispatchable, but is still a valid receiver
     /// type (just not object-safe), is when there is more than one level of pointer indirection.
-    /// E.g., `self: &&Self`, `self: &Rc<Self>`, `self: Box<Box<Self>>`. In these cases, there
-    /// is no way, or at least no inexpensive way, to coerce the receiver from the version where
+    /// E.g., `self: &&Self`, `self: &Rc<Self>`, `self: Box<Box<Self>>`. In these cases, there is
+    /// no way, or at least no easy, inexpensive way, tocoerce the receiver from the version where
     /// `Self = dyn Trait` to the version where `Self = T`, where `T` is the unknown erased type
     /// contained by the trait object, because the object that needs to be coerced is behind
     /// a pointer.
     ///
-    /// In practice, we cannot use `dyn Trait` explicitly in the obligation because it would result
-    /// in a new check that `Trait` is object safe, creating a cycle. So instead, we fudge a little
-    /// by introducing a new type parameter `U` such that `Self: Unsize<U>` and `U: Trait + ?Sized`,
+    /// In practice, we cannot use `dyn Trait` explicitly in the obligation because, at least in the
+    /// current compiler, any occurence of `dyn Trait` causes a call to `is_object_safe(Trait)`,
+    /// resulting in a query cycle. So instead, we fudge a little by introducing a new
+    /// type parameter, `U`, such that `Self: Unsize<U>` and `U: Trait + ?Sized`,
     /// and use `U` in place of `dyn Trait`. Written as a chalk-style query:
     ///
     ///     forall (U: Trait + ?Sized) {
@@ -426,11 +422,6 @@ impl<'tcx> TyCtxt<'tcx> {
     /// for `self: &'a mut Self`, this means `&'a mut Self: DispatchFromDyn<&'a mut U>`
     /// for `self: Rc<Self>`, this means `Rc<Self>: DispatchFromDyn<Rc<U>>`
     /// for `self: Pin<Box<Self>>`, this means `Pin<Box<Self>>: DispatchFromDyn<Pin<Box<U>>>`
-    //
-    // FIXME(mikeyhew) when unsized receivers are implemented as part of unsized rvalues, add this
-    // fallback query: `Receiver: Unsize<Receiver[Self => U]>` to support receivers like
-    // `self: Wrapper<Self>`.
-    #[allow(dead_code)]
     fn receiver_is_dispatchable(
         self,
         method: &ty::AssocItem,
@@ -503,7 +494,7 @@ impl<'tcx> TyCtxt<'tcx> {
         };
 
         // Receiver: DispatchFromDyn<Receiver[Self => U]>
-        let obligation = {
+        let dispatch_from_dyn_obligation = {
             let predicate = ty::TraitRef {
                 def_id: dispatch_from_dyn_did,
                 substs: self.mk_substs_trait(receiver_ty, &[unsized_receiver_ty.into()]),
@@ -516,9 +507,23 @@ impl<'tcx> TyCtxt<'tcx> {
             )
         };
 
+        // Receiver: Unsize<Receiver[Self => U]>
+        let unsize_obligation = {
+            let predicate = ty::TraitRef {
+                def_id: unsize_did,
+                substs: self.mk_substs_trait(receiver_ty, &[unsized_receiver_ty.into()]),
+            }.to_predicate();
+
+            Obligation::new(
+                ObligationCause::dummy(),
+                param_env,
+                predicate
+            )
+        };
+
         self.infer_ctxt().enter(|ref infcx| {
-            // the receiver is dispatchable iff the obligation holds
-            infcx.predicate_must_hold_modulo_regions(&obligation)
+            infcx.predicate_must_hold_modulo_regions(&dispatch_from_dyn_obligation)
+            || infcx.predicate_must_hold_modulo_regions(&unsize_obligation)
         })
     }
 
