@@ -2,8 +2,9 @@ use crate::hir::CodegenFnAttrFlags;
 use crate::hir::Unsafety;
 use crate::hir::def::Namespace;
 use crate::hir::def_id::DefId;
-use crate::ty::{self, Ty, PolyFnSig, TypeFoldable, SubstsRef, TyCtxt};
+use crate::ty::{self, Ty, PolyFnSig, TypeFoldable, SubstsRef, TyCtxt, ToPredicate};
 use crate::ty::print::{FmtPrinter, Printer};
+use crate::ty::subst::{Subst, InternalSubsts};
 use crate::traits;
 use crate::middle::lang_items::DropInPlaceFnLangItem;
 use rustc_target::spec::abi::Abi;
@@ -334,19 +335,32 @@ impl<'tcx> Instance<'tcx> {
         substs: SubstsRef<'tcx>,
     ) -> Option<Instance<'tcx>> {
         debug!("resolve(def_id={:?}, substs={:?})", def_id, substs);
-        let fn_sig = tcx.fn_sig(def_id);
-        let is_vtable_shim = fn_sig.inputs().skip_binder().len() > 0
-            && fn_sig.input(0).skip_binder().is_param(0)
-            && tcx.generics_of(def_id).has_self;
-        if is_vtable_shim {
-            debug!(" => associated item with unsizeable self: Self");
-            Some(Instance {
-                def: InstanceDef::VtableShim(def_id),
-                substs,
-            })
-        } else {
-            Instance::resolve(tcx, param_env, def_id, substs)
+
+        let impl_method = tcx.opt_associated_item(def_id)
+            .unwrap_or_else(|| bug!("resolve_for_vtable: expected an associated item"));
+
+        if impl_method.method_has_self_argument {
+            let impl_trait_ref = tcx.impl_trait_ref(impl_method.container.id())
+                .unwrap_or_else(|| bug!("associated item is not an impl: {:?}", impl_method));
+
+            let trait_method = tcx.associated_items(impl_trait_ref.def_id)
+                .find(|item| {
+                    item.kind == ty::AssocKind::Method
+                    && item.ident == impl_method.ident
+                }).unwrap_or_else(|| {
+                    bug!("could not find trait method named {}", impl_method.ident)
+                });
+
+            if trait_method_has_unsizeable_receiver(tcx, &trait_method) {
+                debug!(" => method item with unsizeable `self`");
+                return Some(Instance {
+                    def: InstanceDef::VtableShim(def_id),
+                    substs,
+                })
+            }
         }
+
+        Instance::resolve(tcx, param_env, def_id, substs)
     }
 
     pub fn resolve_closure(
@@ -501,4 +515,70 @@ fn needs_fn_once_adapter_shim(
         (ty::ClosureKind::FnMut, _) |
         (ty::ClosureKind::FnOnce, _) => Err(())
     }
+}
+
+fn trait_method_has_unsizeable_receiver(
+    tcx: TyCtxt<'tcx>,
+    trait_method: &ty::AssocItem,
+) -> bool {
+    assert!(trait_method.method_has_self_argument);
+
+    let sig = tcx.fn_sig(trait_method.def_id);
+
+    let unsize_trait = tcx.lang_items().unsize_trait()
+        .unwrap_or_else(|| bug!("missing Unsize trait"));
+
+    let unsized_param = tcx.mk_ty_param(
+        ::std::u32::MAX,
+        syntax::symbol::InternedString::intern("UnsizeCheckDummyParam"),
+    );
+
+    let unsize_predicate = ty::TraitRef {
+        def_id: unsize_trait,
+        substs: tcx.mk_substs_trait(tcx.types.self_param, &[unsized_param.into()]),
+    }.to_predicate();
+
+    let modified_param_env = {
+        let mut param_env = tcx.param_env(trait_method.def_id);
+
+        param_env.caller_bounds = tcx.intern_predicates(
+            &param_env.caller_bounds.iter().cloned()
+                .chain(iter::once(unsize_predicate))
+                .collect::<Vec<_>>()
+        );
+
+        param_env
+    };
+
+    let unsize_obligation = {
+        let predicate = sig.map_bound(|sig| {
+            let receiver_ty = sig.inputs()[0];
+
+            let unsized_receiver_ty = {
+                let substs = InternalSubsts::for_item(tcx, trait_method.def_id, |param, _| {
+                    if param.index == 0 {
+                        unsized_param.into()
+                    } else {
+                        tcx.mk_param_from_def(param)
+                    }
+                });
+                receiver_ty.subst(tcx, substs)
+            };
+
+            ty::TraitRef {
+                def_id: unsize_trait,
+                substs: tcx.mk_substs_trait(receiver_ty, &[unsized_receiver_ty.into()]),
+            }
+        }).to_predicate();
+
+        traits::Obligation::new(
+            traits::ObligationCause::dummy(),
+            modified_param_env,
+            predicate,
+        )
+    };
+
+    tcx.infer_ctxt().enter(|ref infcx| {
+        infcx.predicate_must_hold_modulo_regions(&unsize_obligation)
+    })
 }
