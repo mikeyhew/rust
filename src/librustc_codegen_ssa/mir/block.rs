@@ -744,7 +744,7 @@ impl<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>> FunctionCx<'a, 'tcx, Bx> {
 
                         let dest = {
                             let layout = thin_ptr_layout(op.layout.ty);
-                            PlaceRef::alloca(&mut bx, layout, "receiver_sans_vtable")
+                            PlaceRef::alloca(&mut bx, layout)
                         };
 
                         let vtable = base::remove_vtable(&mut bx, source, dest);

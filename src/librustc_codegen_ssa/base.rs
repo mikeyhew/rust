@@ -267,7 +267,7 @@ pub fn remove_vtable<'a, 'tcx, Bx: BuilderMethods<'a, 'tcx>>(
     let src_ty = src.layout.ty;
     let dst_ty = dst.layout.ty;
 
-    match (&src_ty.sty, &dst_ty.sty) {
+    match (&src_ty.kind, &dst_ty.kind) {
         (&ty::Ref(..), &ty::Ref(..)) |
         (&ty::RawPtr(..), &ty::RawPtr(..)) => {
             let operand = bx.load_operand(src);

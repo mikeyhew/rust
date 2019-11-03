@@ -783,7 +783,7 @@ impl<'tcx> TyCtxt<'tcx> {
             let trait_ref = self.impl_trait_ref(did)
                 .unwrap_or_else(|| bug!("not an impl: {:?}", did));
 
-            match trait_ref.self_ty().sty {
+            match trait_ref.self_ty().kind {
                 ty::Adt(def, _) if def.did == adt_def.did => {
                     impl_did = Some(did);
                 },
@@ -817,7 +817,7 @@ impl<'tcx> TyCtxt<'tcx> {
         let struct_ty = self.mk_adt(adt_def, substs);
         let tail = self.struct_tail_erasing_lifetimes(struct_ty, self.param_env(adt_def.did));
 
-        match &tail.sty {
+        match &tail.kind {
             ty::Param(ty::ParamTy {index, ..}) => *index as usize,
             ty => bug!("expected struct tail to be a type parameter, found {:?}", ty)
         }
@@ -826,7 +826,7 @@ impl<'tcx> TyCtxt<'tcx> {
     pub fn dispatched_pointee_ty(
         self, dyn_pointee_ty: Ty<'tcx>, dispatched_self_ty: Ty<'tcx>,
     ) -> Ty<'tcx> {
-        match &dyn_pointee_ty.sty {
+        match &dyn_pointee_ty.kind {
             ty::Dynamic(..) => dispatched_self_ty,
             ty::Adt(adt_def, substs) => {
                 let index = self.type_param_index_of_struct_tail(adt_def);
@@ -843,7 +843,7 @@ impl<'tcx> TyCtxt<'tcx> {
     pub fn dispatched_receiver_ty(
         self, dyn_receiver_ty: Ty<'tcx>, dispatched_self_ty: Ty<'tcx>,
     ) -> Ty<'tcx> {
-        match dyn_receiver_ty.sty {
+        match dyn_receiver_ty.kind {
             ty::Dynamic(..) => dispatched_self_ty,
             ty::RawPtr(ty::TypeAndMut {ty, mutbl}) => {
                 self.mk_ptr(ty::TypeAndMut {
@@ -880,7 +880,7 @@ impl<'tcx> TyCtxt<'tcx> {
 
                 self.mk_adt(adt_def, self.mk_substs(new_substs))
             }
-            _ => bug!("dispatched_receiver_ty: unexpected receiver type: {:?}", dyn_receiver_ty.sty)
+            _ => bug!("dispatched_receiver_ty: unexpected receiver type: {:?}", dyn_receiver_ty.kind)
         }
     }
 }

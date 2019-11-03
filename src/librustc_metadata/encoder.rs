@@ -1161,7 +1161,7 @@ impl EncodeContext<'tcx> {
                     trait_ref.and_then(|t| {
                         if Some(t.def_id) == tcx.lang_items().dispatch_from_dyn_trait()
                         {
-                            if let ty::Adt(..) = t.self_ty().sty {
+                            if let ty::Adt(..) = t.self_ty().kind {
                                 Some(tcx.at(item.span).dispatch_from_dyn_info(def_id))
                             } else {
                                 None

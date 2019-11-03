@@ -11,7 +11,7 @@ use rustc::ty::{self, Ty, TyCtxt};
 use rustc::ty::TypeFoldable;
 use rustc::ty::adjustment::{CoerceUnsizedInfo, DispatchFromDynInfo, ReceiverKind};
 use rustc::ty::util::CopyImplementationError;
-use rustc::ty::subst::UnpackedKind;
+use rustc::ty::subst::GenericArgKind;
 use rustc::infer;
 
 use rustc::hir::def_id::DefId;
@@ -332,7 +332,7 @@ pub fn dispatch_from_dyn_info<'tcx>(gcx: TyCtxt<'tcx>, impl_did: DefId) -> Dispa
         source, target
     );
 
-    match (&source.sty, &target.sty) {
+    match (&source.kind, &target.kind) {
         (
             &ty::Adt(def_a, substs_a),
             &ty::Adt(def_b, substs_b),
@@ -349,7 +349,7 @@ pub fn dispatch_from_dyn_info<'tcx>(gcx: TyCtxt<'tcx>, impl_did: DefId) -> Dispa
                     .enumerate()
                     .find_map(|(i, (ty_a, ty_b))| {
                         let (ty_a, ty_b) = match ty_a.unpack() {
-                            UnpackedKind::Type(ty_a) => (ty_a, ty_b.expect_ty()),
+                            GenericArgKind::Type(ty_a) => (ty_a, ty_b.expect_ty()),
                             _ => return None,
                         };
 
@@ -392,7 +392,7 @@ pub fn dispatch_from_dyn_info<'tcx>(gcx: TyCtxt<'tcx>, impl_did: DefId) -> Dispa
                 };
 
                 // TODO: need to normalize field type?
-                let receiver_kind = match &gcx.type_of(field.did).sty {
+                let receiver_kind = match &gcx.type_of(field.did).kind {
                     ty::Param(..) => ReceiverKind::Wrapper,
                     ty::Ref(..) | ty::RawPtr(..) => ReceiverKind::Pointer,
                     ty::Adt(def, _) => {
@@ -409,7 +409,7 @@ pub fn dispatch_from_dyn_info<'tcx>(gcx: TyCtxt<'tcx>, impl_did: DefId) -> Dispa
             })
         }
         _ => bug!("dispatch_from_dyn_info: should only be called on impls for \
-            struct types. Called on impl for {:?} -> {:?}", source.sty, target.sty)
+            struct types. Called on impl for {:?} -> {:?}", source.kind, target.kind)
     }
 }
 

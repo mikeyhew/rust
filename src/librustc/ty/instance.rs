@@ -530,7 +530,7 @@ fn trait_method_has_unsizeable_receiver(
 
     let unsized_param = tcx.mk_ty_param(
         ::std::u32::MAX,
-        syntax::symbol::InternedString::intern("UnsizeCheckDummyParam"),
+        syntax::symbol::Symbol::intern("UnsizeCheckDummyParam"),
     );
 
     let unsize_predicate = ty::TraitRef {
