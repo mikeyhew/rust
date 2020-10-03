@@ -658,6 +658,11 @@ rustc_queries! {
             -> ty::adjustment::CoerceUnsizedInfo {
                 desc { |tcx| "computing CoerceUnsized info for `{}`", tcx.def_path_str(key) }
             }
+
+        query dispatch_rom_dyn_info(key: DefId)
+            -> ty::adjustment::DispatchFromDynInfo {
+                desc { |tcx| "computing DispatchFromDyn info for `{}`", tcx.def_path_str(key) }
+            }
     }
 
     TypeChecking {

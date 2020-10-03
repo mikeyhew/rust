@@ -194,3 +194,21 @@ pub enum CustomCoerceUnsized {
     /// Records the index of the field being coerced.
     Struct(usize),
 }
+
+#[derive(Clone, Copy, TyEncodable, TyDecodable, Debug, HashStable)]
+pub struct DispatchFromDynInfo {
+    /// Index of the type parameter whose type changes
+    pub type_param_index: usize,
+    /// Index of the field whose type changes
+    pub field_index: usize,
+    /// See ReceiverKind
+    pub receiver_kind: ReceiverKind,
+}
+
+#[derive(Clone, Copy, TyEncodable, TyDecodable, Debug, HashStable)]
+pub enum ReceiverKind {
+    /// e.g. Pin<P>, ManuallyDrop<T>
+    Wrapper,
+    /// e.g. *const T, &'a T, Box<T>, Rc<T>
+    Pointer,
+}

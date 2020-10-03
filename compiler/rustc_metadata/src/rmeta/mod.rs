@@ -391,6 +391,9 @@ struct ImplData {
     /// This is `Some` only for impls of `CoerceUnsized`.
     // FIXME(eddyb) perhaps compute this on the fly if cheap enough?
     coerce_unsized_info: Option<ty::adjustment::CoerceUnsizedInfo>,
+
+    /// This is `Some` only for impls of `DispatchFromDyn`.
+    dispatch_from_dyn_info: Option<ty::adjustment::DispatchFromDynInfo>,
 }
 
 /// Describes whether the container of an associated item
